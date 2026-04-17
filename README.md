@@ -2,7 +2,7 @@
   <img src="assets/icon.png" width="128" alt="pix">
 </p>
 <h1 align="center">pix</h1>
-<p align="center">OpenAI image generation & editing for the terminal — streaming, parallel, image-to-image.</p>
+<p align="center">OpenAI image generation & editing for the terminal — live streaming, parallel, image-to-image.</p>
 
 <p align="center">
   <a href="https://github.com/Aayush9029/pix/releases/latest"><img src="https://img.shields.io/github/v/release/Aayush9029/pix" alt="Release"></a>
@@ -28,7 +28,7 @@ pix -i photo.png "make it cyberpunk, neon rain"
 pix -i a.png -i b.png --transparent "merge them into a single sticker"
 ```
 
-Images save as `<sanitized-prompt>-<timestamp>[-vN].<ext>` in the current directory (or `-o <dir>`).
+Images save as `<sanitized-prompt>-<timestamp>[-vN].<ext>` and **update in place** as partial frames stream in — `open` the file once and watch it sharpen.
 
 ## Options
 
@@ -44,19 +44,15 @@ Images save as `<sanitized-prompt>-<timestamp>[-vN].<ext>` in the current direct
 | `-f, --format <ext>` | `png` / `jpeg` / `webp` |
 | `--compression <0-100>` | Compression for `jpeg` / `webp` |
 | `--transparent` | Transparent background (png / webp only) |
-| `--stream` | Stream via SSE (defaults to `--partials 2`) |
-| `--partials <0-3>` | Partial frames saved as the image renders |
-| `--progress` | Shortcut for `--stream --partials 3` |
 | `-o, --output <dir>` | Output directory (default `.`) |
 | `--json` | Emit a JSON summary |
 
 ## How it works
 
 1. Resolves the prompt from `--prompt`, positional args, or stdin; optionally prepends `--base`.
-2. Picks the endpoint: `POST /v1/images/generations` with no `-i`, `POST /v1/images/edits` (multipart) with one or more `-i` paths.
-3. Fans out `n` parallel requests — each variant is an independent API call.
-4. With streaming enabled, parses Server-Sent Events and writes each partial frame (`…-p1.png`, `…-p2.png`, …) plus the final image as they arrive.
-5. Base64-decodes each image and writes it to disk with a timestamped filename.
+2. Picks the endpoint: `POST /v1/images/generations` when there are no `-i` inputs, `POST /v1/images/edits` (multipart) otherwise.
+3. Fans out `-n` parallel goroutines — each variant is an independent streaming API call with `partial_images=3` (the cap OpenAI exposes).
+4. Every partial frame and the final image land at the same canonical filename via `tempfile + rename`, so the file stays valid at all times and viewers that watch file mtime see it refine.
 
 ## Requirements
 

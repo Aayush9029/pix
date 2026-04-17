@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -18,42 +17,40 @@ import (
 	"github.com/Aayush9029/pix/internal/api"
 	"github.com/Aayush9029/pix/internal/config"
 	"github.com/Aayush9029/pix/internal/ui"
+	"github.com/spf13/pflag"
 )
 
 var version = "dev"
 
-const defaultModel = "gpt-image-1.5"
+const (
+	defaultModel = "gpt-image-1.5"
+	// OpenAI caps partial_images at 3 across all image endpoints as of 2026-04.
+	// We always request the max — the whole point of streaming is to get every
+	// intermediate frame the server is willing to send.
+	maxPartials = 3
+)
 
 var supportedModels = map[string]bool{
-	"gpt-image-1.5":     true,
-	"gpt-image-1":       true,
-	"gpt-image-1-mini":  true,
+	"gpt-image-1.5":    true,
+	"gpt-image-1":      true,
+	"gpt-image-1-mini": true,
 }
 
-type stringList []string
-
-func (s *stringList) String() string     { return strings.Join(*s, ",") }
-func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
-
 type options struct {
-	model         string
-	prompt        string
-	base          string
-	images        stringList
-	n             int
-	size          string
-	quality       string
-	format        string
-	compression   int
-	transparent   bool
-	stream        bool
-	partials      int
-	partialsSet   bool
-	progress      bool
-	output        string
-	jsonOut       bool
-	showVersion   bool
-	showHelp      bool
+	model       string
+	prompt      string
+	base        string
+	images      []string
+	n           int
+	size        string
+	quality     string
+	format      string
+	compression int
+	transparent bool
+	output      string
+	jsonOut     bool
+	showVersion bool
+	showHelp    bool
 }
 
 func main() {
@@ -115,18 +112,6 @@ func run(args []string) error {
 		return err
 	}
 
-	// Streaming behavior:
-	//  --progress      → --stream --partials 3
-	//  --stream alone  → --partials 2
-	//  --partials N    → implies --stream
-	streamRequested := opts.stream || opts.progress || opts.partialsSet
-	partials := opts.partials
-	if opts.progress {
-		partials = 3
-	} else if opts.stream && !opts.partialsSet {
-		partials = 2
-	}
-
 	format := opts.format
 	if format == "" {
 		format = "png"
@@ -135,14 +120,17 @@ func run(args []string) error {
 		return errors.New("--transparent requires format png or webp")
 	}
 
+	partials := maxPartials
 	req := api.Request{
-		Model:        opts.model,
-		Prompt:       prompt,
-		N:            1,
-		Size:         size,
-		Quality:      opts.quality,
-		OutputFormat: format,
-		Images:       []string(opts.images),
+		Model:         opts.model,
+		Prompt:        prompt,
+		N:             1,
+		Size:          size,
+		Quality:       opts.quality,
+		OutputFormat:  format,
+		Images:        opts.images,
+		Stream:        true,
+		PartialImages: &partials,
 	}
 	if opts.transparent {
 		req.Background = "transparent"
@@ -163,23 +151,39 @@ func run(args []string) error {
 	if len(opts.images) > 0 {
 		mode = fmt.Sprintf("edit ×%d", len(opts.images))
 	}
-	ui.Header(fmt.Sprintf("pix · %s · %s · %dx", opts.model, mode, opts.n))
-	if ui.IsTTY() {
-		ui.Dimf("  prompt: %s", truncate(prompt, 80))
-		if opts.size != "" {
-			ui.Dimf("  size: %s", opts.size)
+
+	// Pre-compute every output path so we can show them up front — users know
+	// exactly which files to `open` and watch update in place.
+	paths := make([]string, opts.n)
+	for i := 0; i < opts.n; i++ {
+		name := baseName + "-" + stamp
+		if opts.n > 1 {
+			name = fmt.Sprintf("%s-v%d", name, i+1)
 		}
-		if opts.quality != "" {
-			ui.Dimf("  quality: %s", opts.quality)
+		paths[i] = filepath.Join(outDir, name+"."+format)
+	}
+
+	if !opts.jsonOut {
+		ui.Header(fmt.Sprintf("pix · %s · %s · %dx", opts.model, mode, opts.n))
+		if ui.IsTTY() {
+			ui.Dimf("  prompt: %s", truncate(prompt, 80))
+			if opts.size != "" && opts.size != "auto" {
+				ui.Dimf("  size: %s", opts.size)
+			}
+			if opts.quality != "" {
+				ui.Dimf("  quality: %s", opts.quality)
+			}
+			for _, p := range paths {
+				ui.Dimf("  → %s  (updates live)", relPath(p))
+			}
+			fmt.Println()
 		}
-		fmt.Println()
 	}
 
 	type variantResult struct {
-		index   int
-		savedAt string
-		usage   *api.Usage
-		err     error
+		path  string
+		usage *api.Usage
+		err   error
 	}
 
 	results := make([]variantResult, opts.n)
@@ -196,91 +200,38 @@ func run(args []string) error {
 			if opts.n > 1 {
 				tag = fmt.Sprintf("[v%d] ", idx+1)
 			}
+			path := paths[idx]
 
-			filename := baseName + "-" + stamp
-			if opts.n > 1 {
-				filename = fmt.Sprintf("%s-v%d", filename, idx+1)
-			}
-
-			if streamRequested {
-				variantReq := req
-				variantReq.Stream = true
-				if partials > 0 {
-					p := partials
-					variantReq.PartialImages = &p
-				}
-
-				var savedPath string
-				var usage *api.Usage
-
-				err := client.GenerateStream(ctx, variantReq, func(ev api.StreamEvent) error {
-					ext := ev.OutputFormat
-					if ext == "" {
-						ext = format
-					}
-					switch ev.Kind {
-					case api.EventPartial:
-						if ev.B64JSON == "" {
-							return nil
-						}
-						path := filepath.Join(outDir, fmt.Sprintf("%s-p%d.%s", filename, ev.PartialImageIndex+1, ext))
-						if err := writeB64(path, ev.B64JSON); err != nil {
-							return err
-						}
-						printMu.Lock()
-						ui.Status(fmt.Sprintf("%spartial %d → %s", tag, ev.PartialImageIndex+1, relPath(path)))
-						printMu.Unlock()
-					case api.EventCompleted:
-						path := filepath.Join(outDir, filename+"."+ext)
-						if err := writeB64(path, ev.B64JSON); err != nil {
-							return err
-						}
-						savedPath = path
-						usage = ev.Usage
-					}
+			var usage *api.Usage
+			err := client.GenerateStream(ctx, req, func(ev api.StreamEvent) error {
+				// Every event that carries image data — partial or final — is
+				// written to the same canonical path atomically. Openers see
+				// the file progressively improve; there's exactly one file
+				// per variant at the end, never a `-p1` / `-p2` mess.
+				if ev.B64JSON == "" {
 					return nil
-				})
-				results[idx] = variantResult{index: idx, savedAt: savedPath, usage: usage, err: err}
-				if err == nil && savedPath != "" {
-					printMu.Lock()
-					ui.Success(tag + relPath(savedPath))
-					printMu.Unlock()
 				}
-				return
-			}
-
-			// Non-streaming path.
-			var spinner *ui.Spinner
-			if ui.IsTTY() && opts.n == 1 {
-				spinner = ui.NewSpinner("generating...")
-				spinner.Start()
-			}
-
-			resp, err := client.Generate(ctx, req)
-			if spinner != nil {
-				spinner.Stop()
-			}
-			if err != nil {
-				results[idx] = variantResult{index: idx, err: err}
-				return
-			}
-			if len(resp.Data) == 0 || resp.Data[0].B64JSON == "" {
-				results[idx] = variantResult{index: idx, err: errors.New("empty response")}
-				return
-			}
-			ext := resp.OutputFormat
-			if ext == "" {
-				ext = format
-			}
-			path := filepath.Join(outDir, filename+"."+ext)
-			if err := writeB64(path, resp.Data[0].B64JSON); err != nil {
-				results[idx] = variantResult{index: idx, err: err}
-				return
-			}
-			results[idx] = variantResult{index: idx, savedAt: path, usage: resp.Usage}
-			printMu.Lock()
-			ui.Success(tag + relPath(path))
-			printMu.Unlock()
+				if err := writeAtomic(path, ev.B64JSON); err != nil {
+					return err
+				}
+				switch ev.Kind {
+				case api.EventPartial:
+					if !opts.jsonOut {
+						printMu.Lock()
+						ui.Dimf("  %sframe %d/%d", tag, ev.PartialImageIndex+1, partials)
+						printMu.Unlock()
+					}
+				case api.EventCompleted:
+					usage = ev.Usage
+					if !opts.jsonOut {
+						printMu.Lock()
+						ui.Success(tag + "done → " + relPath(path))
+						printMu.Unlock()
+					}
+				}
+				return nil
+			})
+			results[idx] = variantResult{path: path, usage: usage, err: err}
 		}(i)
 	}
 	wg.Wait()
@@ -293,8 +244,8 @@ func run(args []string) error {
 		if r.err != nil && firstErr == nil {
 			firstErr = r.err
 		}
-		if r.savedAt != "" {
-			saved = append(saved, r.savedAt)
+		if r.err == nil {
+			saved = append(saved, r.path)
 		}
 		if r.usage != nil {
 			totalTokens += r.usage.TotalTokens
@@ -361,50 +312,29 @@ func translateSize(input string) (string, error) {
 
 func parseFlags(args []string) (options, []string, error) {
 	var opts options
-	fs := flag.NewFlagSet("pix", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("pix", pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	fs.StringVar(&opts.model, "model", defaultModel, "")
-	fs.StringVar(&opts.model, "m", defaultModel, "")
-	fs.StringVar(&opts.prompt, "prompt", "", "")
-	fs.StringVar(&opts.prompt, "p", "", "")
-	fs.StringVar(&opts.base, "base", "", "")
-	fs.StringVar(&opts.base, "b", "", "")
-	fs.Var(&opts.images, "image", "")
-	fs.Var(&opts.images, "i", "")
-	fs.IntVar(&opts.n, "n", 1, "")
-	fs.StringVar(&opts.size, "size", "auto", "")
-	fs.StringVar(&opts.size, "s", "auto", "")
-	fs.StringVar(&opts.quality, "quality", "", "")
-	fs.StringVar(&opts.quality, "q", "", "")
-	fs.StringVar(&opts.format, "format", "", "")
-	fs.StringVar(&opts.format, "f", "", "")
+	fs.StringVarP(&opts.model, "model", "m", defaultModel, "")
+	fs.StringVarP(&opts.prompt, "prompt", "p", "", "")
+	fs.StringVarP(&opts.base, "base", "b", "", "")
+	fs.StringArrayVarP(&opts.images, "image", "i", nil, "")
+	fs.IntVarP(&opts.n, "n", "n", 1, "")
+	fs.StringVarP(&opts.size, "size", "s", "auto", "")
+	fs.StringVarP(&opts.quality, "quality", "q", "", "")
+	fs.StringVarP(&opts.format, "format", "f", "", "")
 	fs.IntVar(&opts.compression, "compression", -1, "")
 	fs.BoolVar(&opts.transparent, "transparent", false, "")
-	fs.BoolVar(&opts.stream, "stream", false, "")
-	fs.IntVar(&opts.partials, "partials", 0, "")
-	fs.BoolVar(&opts.progress, "progress", false, "")
-	fs.StringVar(&opts.output, "output", ".", "")
-	fs.StringVar(&opts.output, "o", ".", "")
+	fs.StringVarP(&opts.output, "output", "o", ".", "")
 	fs.BoolVar(&opts.jsonOut, "json", false, "")
-	fs.BoolVar(&opts.showVersion, "version", false, "")
-	fs.BoolVar(&opts.showVersion, "v", false, "")
-	fs.BoolVar(&opts.showHelp, "help", false, "")
-	fs.BoolVar(&opts.showHelp, "h", false, "")
+	fs.BoolVarP(&opts.showVersion, "version", "v", false, "")
+	fs.BoolVarP(&opts.showHelp, "help", "h", false, "")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, nil, err
 	}
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "partials" {
-			opts.partialsSet = true
-		}
-	})
 	if opts.n < 1 || opts.n > 10 {
 		return opts, nil, fmt.Errorf("--n must be between 1 and 10 (got %d)", opts.n)
-	}
-	if opts.partials < 0 || opts.partials > 3 {
-		return opts, nil, fmt.Errorf("--partials must be between 0 and 3 (got %d)", opts.partials)
 	}
 	return opts, fs.Args(), nil
 }
@@ -427,12 +357,19 @@ func sanitizeName(s string) string {
 	return s
 }
 
-func writeB64(path, data string) error {
-	raw, err := base64.StdEncoding.DecodeString(data)
+// writeAtomic decodes a base64 image and writes it to `path`, replacing any
+// previous contents atomically. Partial frames arriving while a viewer has
+// the file open never leave a torn/partial byte stream on disk.
+func writeAtomic(path, b64Data string) error {
+	raw, err := base64.StdEncoding.DecodeString(b64Data)
 	if err != nil {
 		return fmt.Errorf("decode base64: %w", err)
 	}
-	return os.WriteFile(path, raw, 0o644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func relPath(p string) string {
@@ -459,27 +396,26 @@ func showHelp() {
 	fmt.Printf(`%spix%s v%s — OpenAI image generation & editing for the terminal
 
 %sUsage:%s
-  pix <prompt>                         Generate an image from a prompt
+  pix <prompt>                         Generate from a prompt
   pix --prompt <prompt>                Same, as a flag
   echo "prompt" | pix                  Read prompt from stdin
   pix -i photo.png "make it cyberpunk" Edit an existing image (image-to-image)
   pix -i a.png -i b.png "combine them" Reference multiple input images
 
+Streams by default — the output file is overwritten atomically each time
+the API emits a partial frame, so viewers see it improve live.
+
 %sOptions:%s
-  -m, --model <id>        Model (default: gpt-image-1.5)
-                          gpt-image-1.5, gpt-image-1, gpt-image-1-mini
+  -m, --model <id>        gpt-image-1.5 (default) | gpt-image-1 | gpt-image-1-mini
   -p, --prompt <text>     Prompt text (overrides positional / stdin)
   -b, --base <text>       Base prompt prepended to the main prompt
   -i, --image <path>      Input image for editing (repeatable, up to 16)
-  -n <1-10>               Number of variants generated in parallel
-  -s, --size <preset>     square | landscape | portrait | auto (default: auto)
+  -n <1-10>               Variants generated in parallel
+  -s, --size <preset>     square | landscape | portrait | auto
   -q, --quality <level>   auto | low | medium | high
   -f, --format <ext>      png | jpeg | webp (default: png)
       --compression <n>   0-100 for jpeg / webp
-      --transparent       Generate with a transparent background (png/webp only)
-      --stream            Stream via SSE (defaults to --partials 2)
-      --partials <0-3>    Number of partial frames to save while rendering
-      --progress          Shortcut for --stream --partials 3
+      --transparent       Transparent background (png / webp only)
   -o, --output <dir>      Output directory (default: .)
       --json              Emit a JSON summary to stdout
   -v, --version           Show version
@@ -487,7 +423,7 @@ func showHelp() {
 
 %sExamples:%s
   pix "a corgi astronaut on mars, cinematic"
-  pix -n 4 --progress "isometric tiny village"
+  pix -n 4 "isometric tiny village"
   echo "neon koi fish" | pix -s landscape -q high
   pix -b "studio ghibli style" -p "rainy train station"
   pix -i cat.png --transparent "remove background, add sparkles"
