@@ -129,6 +129,9 @@ func run(args []string) error {
 		Quality:       opts.quality,
 		OutputFormat:  format,
 		Images:        opts.images,
+		// OpenAI only exposes `auto` and `low`; there's no way to fully
+		// disable moderation. Always ask for the permissive side.
+		Moderation:    "low",
 		Stream:        true,
 		PartialImages: &partials,
 	}
@@ -173,8 +176,12 @@ func run(args []string) error {
 			if opts.quality != "" {
 				ui.Dimf("  quality: %s", opts.quality)
 			}
-			for _, p := range paths {
-				ui.Dimf("  → %s  (updates live)", relPath(p))
+			for i, p := range paths {
+				label := "→"
+				if opts.n > 1 {
+					label = fmt.Sprintf("%sv%d%s", ui.VariantColor(i), i+1, ui.Reset)
+				}
+				fmt.Printf("  %s %s %s%s\n", ui.LiveBadge(), label, ui.Dim, relPath(p)+ui.Reset)
 			}
 			fmt.Println()
 		}
@@ -196,9 +203,12 @@ func run(args []string) error {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+			// Each variant gets a stable color that ties its frame updates
+			// to its final-success line — scanning the log, v1 is always
+			// cyan, v2 magenta, etc.
 			tag := ""
 			if opts.n > 1 {
-				tag = fmt.Sprintf("[v%d] ", idx+1)
+				tag = fmt.Sprintf("%s[v%d]%s ", ui.VariantColor(idx), idx+1, ui.Reset)
 			}
 			path := paths[idx]
 

@@ -44,6 +44,7 @@ type Request struct {
 	OutputFormat      string
 	OutputCompression *int
 	Background        string
+	Moderation        string
 	Stream            bool
 	PartialImages     *int
 	Images            []string // local file paths → routes to /v1/images/edits
@@ -176,6 +177,9 @@ func buildJSON(r Request) (io.Reader, string, error) {
 	if r.Background != "" {
 		payload["background"] = r.Background
 	}
+	if r.Moderation != "" {
+		payload["moderation"] = r.Moderation
+	}
 	if r.Stream {
 		payload["stream"] = true
 	}
@@ -226,6 +230,9 @@ func buildMultipart(r Request) (io.Reader, string, error) {
 		}
 	}
 	if err := writeField("background", r.Background); err != nil {
+		return nil, "", err
+	}
+	if err := writeField("moderation", r.Moderation); err != nil {
 		return nil, "", err
 	}
 	if r.Stream {

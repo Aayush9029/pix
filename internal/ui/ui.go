@@ -8,15 +8,31 @@ import (
 )
 
 const (
-	Green  = "\033[32m"
-	Red    = "\033[31m"
-	Yellow = "\033[33m"
-	Cyan   = "\033[36m"
-	Blue   = "\033[34m"
-	Dim    = "\033[2m"
-	Bold   = "\033[1m"
-	Reset  = "\033[0m"
+	Green   = "\033[32m"
+	Red     = "\033[31m"
+	Yellow  = "\033[33m"
+	Cyan    = "\033[36m"
+	Blue    = "\033[34m"
+	Magenta = "\033[35m"
+	Orange  = "\033[38;5;208m"
+	Dim     = "\033[2m"
+	Bold    = "\033[1m"
+	Reset   = "\033[0m"
 )
+
+// variantPalette assigns each variant a stable color so its frame logs and
+// its final-success line share the same hue — easy to correlate at a glance.
+var variantPalette = []string{Cyan, Magenta, Yellow, Green, Blue, Orange, Red}
+
+// VariantColor returns the ANSI color for variant index i (0-based).
+func VariantColor(i int) string {
+	return variantPalette[i%len(variantPalette)]
+}
+
+// LiveBadge returns a bold red "LIVE" label for streaming output headers.
+func LiveBadge() string {
+	return Bold + Red + "LIVE" + Reset
+}
 
 func IsTTY() bool {
 	fi, err := os.Stdout.Stat()
