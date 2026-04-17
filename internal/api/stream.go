@@ -39,11 +39,16 @@ type streamEnvelope struct {
 }
 
 // GenerateStream opens an SSE stream and invokes onEvent for each parsed event.
-// The stream always ends with a completed event; partial events may arrive 0–N times.
+// Handles both /v1/images/generations and /v1/images/edits (event type prefixes
+// `image_generation.*` and `image_edit.*`).
 func (c *Client) GenerateStream(ctx context.Context, r Request, onEvent func(StreamEvent) error) error {
 	r.Stream = true
 
-	req, err := c.newRequest(ctx, r, "text/event-stream")
+	body, ctype, err := c.buildBody(r)
+	if err != nil {
+		return err
+	}
+	req, err := c.newRequest(ctx, r, body, ctype, "text/event-stream")
 	if err != nil {
 		return err
 	}
@@ -54,12 +59,11 @@ func (c *Client) GenerateStream(ctx context.Context, r Request, onEvent func(Str
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return decodeAPIError(body, resp.StatusCode)
+		raw, _ := io.ReadAll(resp.Body)
+		return decodeAPIError(raw, resp.StatusCode)
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
-	// Partial b64 payloads can be multi-MB; give the scanner a large buffer.
 	scanner.Buffer(make([]byte, 1024*1024), 32*1024*1024)
 
 	var dataBuf strings.Builder
@@ -86,9 +90,9 @@ func (c *Client) GenerateStream(ctx context.Context, r Request, onEvent func(Str
 			Usage:             env.Usage,
 		}
 		switch env.Type {
-		case "image_generation.partial_image":
+		case "image_generation.partial_image", "image_edit.partial_image":
 			ev.Kind = EventPartial
-		case "image_generation.completed":
+		case "image_generation.completed", "image_edit.completed":
 			ev.Kind = EventCompleted
 		default:
 			return nil
@@ -105,7 +109,7 @@ func (c *Client) GenerateStream(ctx context.Context, r Request, onEvent func(Str
 			continue
 		}
 		if strings.HasPrefix(line, ":") {
-			continue // SSE comment
+			continue
 		}
 		if strings.HasPrefix(line, "data:") {
 			chunk := strings.TrimPrefix(line, "data:")
@@ -115,11 +119,9 @@ func (c *Client) GenerateStream(ctx context.Context, r Request, onEvent func(Str
 			}
 			dataBuf.WriteString(chunk)
 		}
-		// Ignore other SSE fields (event:, id:, retry:).
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read stream: %w", err)
 	}
-	// Flush any trailing event that didn't end with a blank line.
 	return flush()
 }

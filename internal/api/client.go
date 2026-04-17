@@ -6,11 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"time"
 )
 
-const endpoint = "https://api.openai.com/v1/images/generations"
+const (
+	endpointGenerate = "https://api.openai.com/v1/images/generations"
+	endpointEdit     = "https://api.openai.com/v1/images/edits"
+)
 
 type Client struct {
 	apiKey string
@@ -21,32 +28,27 @@ func NewClient(apiKey string) *Client {
 	return &Client{
 		apiKey: apiKey,
 		http: &http.Client{
-			Timeout: 5 * time.Minute,
+			Timeout: 10 * time.Minute,
 		},
 	}
 }
 
 type Request struct {
-	Model             string `json:"model"`
-	Prompt            string `json:"prompt"`
-	N                 int    `json:"n,omitempty"`
-	Size              string `json:"size,omitempty"`
-	Quality           string `json:"quality,omitempty"`
-	OutputFormat      string `json:"output_format,omitempty"`
-	OutputCompression *int   `json:"output_compression,omitempty"`
-	Background        string `json:"background,omitempty"`
-	Moderation        string `json:"moderation,omitempty"`
-	Stream            bool   `json:"stream,omitempty"`
-	PartialImages     *int   `json:"partial_images,omitempty"`
-	ResponseFormat    string `json:"response_format,omitempty"`
-	Style             string `json:"style,omitempty"`
-	User              string `json:"user,omitempty"`
+	Model             string
+	Prompt            string
+	N                 int
+	Size              string
+	Quality           string
+	OutputFormat      string
+	OutputCompression *int
+	Background        string
+	Stream            bool
+	PartialImages     *int
+	Images            []string // local file paths → routes to /v1/images/edits
 }
 
 type ImageData struct {
-	B64JSON       string `json:"b64_json,omitempty"`
-	URL           string `json:"url,omitempty"`
-	RevisedPrompt string `json:"revised_prompt,omitempty"`
+	B64JSON string `json:"b64_json,omitempty"`
 }
 
 type Usage struct {
@@ -73,23 +75,6 @@ type apiError struct {
 	} `json:"error"`
 }
 
-func (c *Client) newRequest(ctx context.Context, body any, accept string) (*http.Request, error) {
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(buf))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	if accept != "" {
-		req.Header.Set("Accept", accept)
-	}
-	return req, nil
-}
-
 func decodeAPIError(body []byte, status int) error {
 	var e apiError
 	if err := json.Unmarshal(body, &e); err == nil && e.Err.Message != "" {
@@ -97,37 +82,180 @@ func decodeAPIError(body []byte, status int) error {
 	}
 	snippet := string(body)
 	if len(snippet) > 500 {
-		snippet = snippet[:500] + "..."
+		snippet = snippet[:500] + "…"
 	}
 	return fmt.Errorf("openai %d: %s", status, snippet)
 }
 
-// Generate performs a non-streaming image generation request.
+// Generate routes to the right endpoint based on whether Images is set.
 func (c *Client) Generate(ctx context.Context, r Request) (*Response, error) {
 	r.Stream = false
 	r.PartialImages = nil
 
-	req, err := c.newRequest(ctx, r, "application/json")
+	body, ctype, err := c.buildBody(r)
 	if err != nil {
 		return nil, err
 	}
+	req, err := c.newRequest(ctx, r, body, ctype, "application/json")
+	if err != nil {
+		return nil, err
+	}
+
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, decodeAPIError(body, resp.StatusCode)
+		return nil, decodeAPIError(raw, resp.StatusCode)
 	}
 
 	var out Response
-	if err := json.Unmarshal(body, &out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &out, nil
+}
+
+// endpointFor picks the endpoint based on whether input images are attached.
+func endpointFor(r Request) string {
+	if len(r.Images) > 0 {
+		return endpointEdit
+	}
+	return endpointGenerate
+}
+
+func (c *Client) newRequest(ctx context.Context, r Request, body io.Reader, contentType, accept string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointFor(r), body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	return req, nil
+}
+
+// buildBody constructs either a JSON body (generations) or multipart body (edits).
+func (c *Client) buildBody(r Request) (io.Reader, string, error) {
+	if len(r.Images) > 0 {
+		return buildMultipart(r)
+	}
+	return buildJSON(r)
+}
+
+func buildJSON(r Request) (io.Reader, string, error) {
+	payload := map[string]any{
+		"model":  r.Model,
+		"prompt": r.Prompt,
+	}
+	if r.N > 0 {
+		payload["n"] = r.N
+	}
+	if r.Size != "" {
+		payload["size"] = r.Size
+	}
+	if r.Quality != "" {
+		payload["quality"] = r.Quality
+	}
+	if r.OutputFormat != "" {
+		payload["output_format"] = r.OutputFormat
+	}
+	if r.OutputCompression != nil {
+		payload["output_compression"] = *r.OutputCompression
+	}
+	if r.Background != "" {
+		payload["background"] = r.Background
+	}
+	if r.Stream {
+		payload["stream"] = true
+	}
+	if r.PartialImages != nil {
+		payload["partial_images"] = *r.PartialImages
+	}
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return nil, "", err
+	}
+	return bytes.NewReader(buf), "application/json", nil
+}
+
+func buildMultipart(r Request) (io.Reader, string, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	writeField := func(key, val string) error {
+		if val == "" {
+			return nil
+		}
+		return mw.WriteField(key, val)
+	}
+
+	if err := writeField("model", r.Model); err != nil {
+		return nil, "", err
+	}
+	if err := writeField("prompt", r.Prompt); err != nil {
+		return nil, "", err
+	}
+	if r.N > 0 {
+		if err := writeField("n", strconv.Itoa(r.N)); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := writeField("size", r.Size); err != nil {
+		return nil, "", err
+	}
+	if err := writeField("quality", r.Quality); err != nil {
+		return nil, "", err
+	}
+	if err := writeField("output_format", r.OutputFormat); err != nil {
+		return nil, "", err
+	}
+	if r.OutputCompression != nil {
+		if err := writeField("output_compression", strconv.Itoa(*r.OutputCompression)); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := writeField("background", r.Background); err != nil {
+		return nil, "", err
+	}
+	if r.Stream {
+		if err := writeField("stream", "true"); err != nil {
+			return nil, "", err
+		}
+	}
+	if r.PartialImages != nil {
+		if err := writeField("partial_images", strconv.Itoa(*r.PartialImages)); err != nil {
+			return nil, "", err
+		}
+	}
+
+	for _, path := range r.Images {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, "", fmt.Errorf("open image %s: %w", path, err)
+		}
+		fw, err := mw.CreateFormFile("image[]", filepath.Base(path))
+		if err != nil {
+			f.Close()
+			return nil, "", err
+		}
+		if _, err := io.Copy(fw, f); err != nil {
+			f.Close()
+			return nil, "", fmt.Errorf("read image %s: %w", path, err)
+		}
+		f.Close()
+	}
+
+	if err := mw.Close(); err != nil {
+		return nil, "", err
+	}
+	return &buf, mw.FormDataContentType(), nil
 }
