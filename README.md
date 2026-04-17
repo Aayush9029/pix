@@ -46,10 +46,9 @@ Images save as `<sanitized-prompt>-<timestamp>[-vN].<ext>` in the current direct
 | `-f, --format <ext>` | `png` / `jpeg` / `webp` (gpt-image only) |
 | `--background <v>` | `auto` / `transparent` / `opaque` |
 | `--compression <0-100>` | Compression for `jpeg` / `webp` |
-| `--stream` | Enable SSE streaming |
-| `--partials <0-3>` | Partial frames to emit (implies `--stream`) |
+| `--stream` | Stream via SSE (defaults to `--partials 2`) |
+| `--partials <0-3>` | Number of partial frames to save as the image renders |
 | `--progress` | Shortcut for `--stream --partials 3` |
-| `--save-partials` | Also save intermediate frames |
 | `-o, --output <dir>` | Output directory (default `.`) |
 | `--name <prefix>` | Filename prefix override |
 | `--json` | Emit a JSON summary |
@@ -59,7 +58,7 @@ Images save as `<sanitized-prompt>-<timestamp>[-vN].<ext>` in the current direct
 1. Resolves prompt from `--prompt`, positional args, or stdin.
 2. Prepends `--base` if set, validates model constraints.
 3. Spawns `n` parallel calls to `POST /v1/images/generations`.
-4. With `--stream` / `--progress`, parses Server-Sent Events — writing the final `image_generation.completed` image (and partials when `--save-partials`) as they arrive.
+4. With `--stream` / `--partials` / `--progress`, parses Server-Sent Events and writes each partial frame (`…-p1.png`, `…-p2.png`, …) plus the final image as they arrive.
 5. Base64 decodes each image and writes it to disk with a timestamped filename.
 
 ## Requirements

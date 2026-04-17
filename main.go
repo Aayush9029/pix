@@ -37,8 +37,8 @@ type options struct {
 	moderation    string
 	stream        bool
 	partials      int
+	partialsSet   bool
 	progress      bool
-	savePartials  bool
 	output        string
 	name          string
 	jsonOut       bool
@@ -89,16 +89,21 @@ func run(args []string) error {
 	}
 
 	// Decide streaming behavior.
+	// --progress is a shortcut for --stream --partials 3
+	// --stream alone defaults to --partials 2 so the user actually sees partial frames
+	// --partials N implies --stream
 	model := opts.model
 	streamingCapable := strings.HasPrefix(model, "gpt-image-")
-	streamRequested := opts.stream || opts.progress || opts.partials > 0
+	streamRequested := opts.stream || opts.progress || opts.partialsSet
+	partials := opts.partials
+	if opts.progress {
+		partials = 3
+	} else if opts.stream && !opts.partialsSet {
+		partials = 2
+	}
 	if streamRequested && !streamingCapable {
 		ui.Status(fmt.Sprintf("streaming not supported by %s — falling back to non-streaming", model))
 		streamRequested = false
-	}
-	partials := opts.partials
-	if opts.progress && partials == 0 {
-		partials = 3
 	}
 
 	format := opts.format
@@ -194,20 +199,21 @@ func run(args []string) error {
 				err := client.GenerateStream(ctx, variantReq, func(ev api.StreamEvent) error {
 					switch ev.Kind {
 					case api.EventPartial:
-						printMu.Lock()
-						ui.Status(fmt.Sprintf("%spartial %d received", tag, ev.PartialImageIndex+1))
-						printMu.Unlock()
-						if opts.savePartials && ev.B64JSON != "" {
-							ext := ev.OutputFormat
-							if ext == "" {
-								ext = format
-							}
-							path := filepath.Join(outDir, fmt.Sprintf("%s-p%d.%s", filename, ev.PartialImageIndex+1, ext))
-							if err := writeB64(path, ev.B64JSON); err != nil {
-								return err
-							}
-							partialPaths = append(partialPaths, path)
+						if ev.B64JSON == "" {
+							return nil
 						}
+						ext := ev.OutputFormat
+						if ext == "" {
+							ext = format
+						}
+						path := filepath.Join(outDir, fmt.Sprintf("%s-p%d.%s", filename, ev.PartialImageIndex+1, ext))
+						if err := writeB64(path, ev.B64JSON); err != nil {
+							return err
+						}
+						partialPaths = append(partialPaths, path)
+						printMu.Lock()
+						ui.Status(fmt.Sprintf("%spartial %d → %s", tag, ev.PartialImageIndex+1, relPath(path)))
+						printMu.Unlock()
 					case api.EventCompleted:
 						ext := ev.OutputFormat
 						if ext == "" {
@@ -349,7 +355,6 @@ func parseFlags(args []string) (options, []string, error) {
 	fs.BoolVar(&opts.stream, "stream", false, "")
 	fs.IntVar(&opts.partials, "partials", 0, "")
 	fs.BoolVar(&opts.progress, "progress", false, "")
-	fs.BoolVar(&opts.savePartials, "save-partials", false, "")
 	fs.StringVar(&opts.output, "output", ".", "")
 	fs.StringVar(&opts.output, "o", ".", "")
 	fs.StringVar(&opts.name, "name", "", "")
@@ -362,6 +367,11 @@ func parseFlags(args []string) (options, []string, error) {
 	if err := fs.Parse(args); err != nil {
 		return opts, nil, err
 	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "partials" {
+			opts.partialsSet = true
+		}
+	})
 	if opts.n < 1 || opts.n > 10 {
 		return opts, nil, fmt.Errorf("--n must be between 1 and 10 (got %d)", opts.n)
 	}
@@ -454,10 +464,9 @@ func showHelp() {
       --background <v>    auto | transparent | opaque
       --compression <n>   0-100 for jpeg/webp
       --moderation <v>    auto | low
-      --stream            Enable Server-Sent Event streaming
-      --partials <0-3>    Number of partial frames to emit (implies stream)
+      --stream            Stream via SSE (defaults to --partials 2)
+      --partials <0-3>    Number of partial frames to save while rendering
       --progress          Shortcut for --stream --partials 3
-      --save-partials     Also save intermediate frames to disk
   -o, --output <dir>      Output directory (default: .)
       --name <prefix>     Filename prefix (default: derived from prompt)
       --json              Emit a JSON summary to stdout
