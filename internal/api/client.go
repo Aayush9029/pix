@@ -8,9 +8,11 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -242,7 +244,11 @@ func buildMultipart(r Request) (io.Reader, string, error) {
 		if err != nil {
 			return nil, "", fmt.Errorf("open image %s: %w", path, err)
 		}
-		fw, err := mw.CreateFormFile("image[]", filepath.Base(path))
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition",
+			fmt.Sprintf(`form-data; name="image[]"; filename=%q`, filepath.Base(path)))
+		header.Set("Content-Type", imageMimeType(path))
+		fw, err := mw.CreatePart(header)
 		if err != nil {
 			f.Close()
 			return nil, "", err
@@ -258,4 +264,19 @@ func buildMultipart(r Request) (io.Reader, string, error) {
 		return nil, "", err
 	}
 	return &buf, mw.FormDataContentType(), nil
+}
+
+// imageMimeType returns the Content-Type OpenAI expects for /v1/images/edits.
+// Only png, jpeg, and webp are accepted.
+func imageMimeType(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	default:
+		return "application/octet-stream"
+	}
 }
