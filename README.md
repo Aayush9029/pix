@@ -15,7 +15,7 @@
 brew install aayush9029/tap/pix
 ```
 
-Requires `OPENAI_API_KEY` in your environment. Defaults to `gpt-image-1.5`.
+Requires `OPENAI_API_KEY` in your environment. Defaults to `gpt-image-2` (state-of-the-art, launched 2026-04-21).
 
 ## Usage
 
@@ -34,7 +34,7 @@ Images save as `<sanitized-prompt>-<timestamp>[-vN].<ext>` and **update in place
 
 | Option | Description |
 |--------|-------------|
-| `-m, --model <id>` | `gpt-image-1.5` (default), `gpt-image-1`, `gpt-image-1-mini` |
+| `-m, --model <id>` | `gpt-image-2` (default), `gpt-image-1.5`, `gpt-image-1`, `gpt-image-1-mini` |
 | `-p, --prompt <text>` | Prompt text (overrides positional / stdin) |
 | `-b, --base <text>` | Base prompt prepended to the main prompt |
 | `-i, --image <path>` | Input image for editing (repeatable, up to 16) |
@@ -43,7 +43,7 @@ Images save as `<sanitized-prompt>-<timestamp>[-vN].<ext>` and **update in place
 | `-q, --quality <level>` | `auto` / `low` / `medium` / `high` |
 | `-f, --format <ext>` | `png` / `jpeg` / `webp` |
 | `--compression <0-100>` | Compression for `jpeg` / `webp` |
-| `--transparent` | Transparent background (png / webp only) |
+| `--transparent` | Transparent background (png / webp only; not supported on `gpt-image-2`) |
 | `-o, --output <dir>` | Output directory (default `.`) |
 | `--json` | Emit a JSON summary |
 

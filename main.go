@@ -23,7 +23,7 @@ import (
 var version = "dev"
 
 const (
-	defaultModel = "gpt-image-1.5"
+	defaultModel = "gpt-image-2"
 	// OpenAI caps partial_images at 3 across all image endpoints as of 2026-04.
 	// We always request the max — the whole point of streaming is to get every
 	// intermediate frame the server is willing to send.
@@ -31,6 +31,7 @@ const (
 )
 
 var supportedModels = map[string]bool{
+	"gpt-image-2":      true,
 	"gpt-image-1.5":    true,
 	"gpt-image-1":      true,
 	"gpt-image-1-mini": true,
@@ -74,7 +75,7 @@ func run(args []string) error {
 	}
 
 	if !supportedModels[opts.model] {
-		return fmt.Errorf("unsupported model %q (use gpt-image-1.5, gpt-image-1, or gpt-image-1-mini)", opts.model)
+		return fmt.Errorf("unsupported model %q (use gpt-image-2, gpt-image-1.5, gpt-image-1, or gpt-image-1-mini)", opts.model)
 	}
 
 	prompt, err := resolvePrompt(opts, positional)
@@ -118,6 +119,11 @@ func run(args []string) error {
 	}
 	if opts.transparent && format == "jpeg" {
 		return errors.New("--transparent requires format png or webp")
+	}
+	// gpt-image-2 doesn't support transparent backgrounds yet (per OpenAI docs,
+	// 2026-04). Older gpt-image-1.x models still do.
+	if opts.transparent && opts.model == "gpt-image-2" {
+		return errors.New("--transparent is not supported on gpt-image-2 (use gpt-image-1.5 or gpt-image-1)")
 	}
 
 	partials := maxPartials
@@ -416,7 +422,7 @@ Streams by default — the output file is overwritten atomically each time
 the API emits a partial frame, so viewers see it improve live.
 
 %sOptions:%s
-  -m, --model <id>        gpt-image-1.5 (default) | gpt-image-1 | gpt-image-1-mini
+  -m, --model <id>        gpt-image-2 (default) | gpt-image-1.5 | gpt-image-1 | gpt-image-1-mini
   -p, --prompt <text>     Prompt text (overrides positional / stdin)
   -b, --base <text>       Base prompt prepended to the main prompt
   -i, --image <path>      Input image for editing (repeatable, up to 16)
