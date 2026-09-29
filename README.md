@@ -15,7 +15,7 @@
 brew install aayush9029/tap/pix
 ```
 
-Requires `OPENAI_API_KEY` in your environment. Defaults to `gpt-image-2` (state-of-the-art, launched 2026-04-21).
+Requires `OPENAI_API_KEY` in your environment. Defaults to `gpt-image-2.5-sunburst`.
 
 ## Usage
 
@@ -23,6 +23,7 @@ Requires `OPENAI_API_KEY` in your environment. Defaults to `gpt-image-2` (state-
 pix "a corgi astronaut on mars, cinematic"
 pix -n 4 --progress "isometric tiny village"
 echo "neon koi fish" | pix -s landscape -q high
+pix -s 4k -q max "misty fjord at dawn"
 pix -b "studio ghibli style" -p "rainy train station"
 pix -i photo.png "make it cyberpunk, neon rain"
 pix -i a.png -i b.png --transparent "merge them into a single sticker"
@@ -34,16 +35,16 @@ Images save as `<sanitized-prompt>-<timestamp>[-vN].<ext>` and **update in place
 
 | Option | Description |
 |--------|-------------|
-| `-m, --model <id>` | `gpt-image-2` (default), `gpt-image-1.5`, `gpt-image-1`, `gpt-image-1-mini` |
+| `-m, --model <id>` | `gpt-image-2.5-sunburst` (default), `gpt-image-2.5-flare` (faster), `gpt-image-1-mini` (cheapest) |
 | `-p, --prompt <text>` | Prompt text (overrides positional / stdin) |
 | `-b, --base <text>` | Base prompt prepended to the main prompt |
 | `-i, --image <path>` | Input image for editing (repeatable, up to 16) |
 | `-n <1-10>` | Variants generated in parallel |
-| `-s, --size <preset>` | `square` / `landscape` / `portrait` / `auto` |
-| `-q, --quality <level>` | `auto` / `low` / `medium` / `high` |
+| `-s, --size <size>` | `square` / `landscape` / `portrait` / `4k` / `auto` / `WIDTHxHEIGHT` (multiples of 16, ratio up to 3:1, max 3840x2160) |
+| `-q, --quality <level>` | `auto` / `low` / `medium` / `high` / `xhigh` / `max` (`xhigh` and `max` need a 2.5 model) |
 | `-f, --format <ext>` | `png` / `jpeg` / `webp` |
 | `--compression <0-100>` | Compression for `jpeg` / `webp` |
-| `--transparent` | Transparent background (png / webp only; not supported on `gpt-image-2`) |
+| `--transparent` | Transparent background (png / webp only) |
 | `-o, --output <dir>` | Output directory (default `.`) |
 | `--json` | Emit a JSON summary |
 
@@ -56,7 +57,7 @@ Images save as `<sanitized-prompt>-<timestamp>[-vN].<ext>` and **update in place
 
 ## Requirements
 
-macOS, `OPENAI_API_KEY` exported. Only `gpt-image-*` models are supported — all of them allow streaming, transparency, and image-to-image editing.
+macOS, `OPENAI_API_KEY` exported. All supported models allow streaming, transparency, and image-to-image editing.
 
 ## License
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,18 +24,18 @@ import (
 var version = "dev"
 
 const (
-	defaultModel = "gpt-image-2"
+	defaultModel = "gpt-image-2.5-sunburst"
 	// OpenAI caps partial_images at 3 across all image endpoints as of 2026-04.
 	// We always request the max — the whole point of streaming is to get every
 	// intermediate frame the server is willing to send.
 	maxPartials = 3
 )
 
+// gpt-image-1-mini stays as the budget option (~4x cheaper per output token).
 var supportedModels = map[string]bool{
-	"gpt-image-2":      true,
-	"gpt-image-1.5":    true,
-	"gpt-image-1":      true,
-	"gpt-image-1-mini": true,
+	"gpt-image-2.5-sunburst": true,
+	"gpt-image-2.5-flare":    true,
+	"gpt-image-1-mini":       true,
 }
 
 type options struct {
@@ -75,7 +76,7 @@ func run(args []string) error {
 	}
 
 	if !supportedModels[opts.model] {
-		return fmt.Errorf("unsupported model %q (use gpt-image-2, gpt-image-1.5, gpt-image-1, or gpt-image-1-mini)", opts.model)
+		return fmt.Errorf("unsupported model %q (use gpt-image-2.5-sunburst, gpt-image-2.5-flare, or gpt-image-1-mini)", opts.model)
 	}
 
 	prompt, err := resolvePrompt(opts, positional)
@@ -120,21 +121,16 @@ func run(args []string) error {
 	if opts.transparent && format == "jpeg" {
 		return errors.New("--transparent requires format png or webp")
 	}
-	// gpt-image-2 doesn't support transparent backgrounds yet (per OpenAI docs,
-	// 2026-04). Older gpt-image-1.x models still do.
-	if opts.transparent && opts.model == "gpt-image-2" {
-		return errors.New("--transparent is not supported on gpt-image-2 (use gpt-image-1.5 or gpt-image-1)")
-	}
 
 	partials := maxPartials
 	req := api.Request{
-		Model:         opts.model,
-		Prompt:        prompt,
-		N:             1,
-		Size:          size,
-		Quality:       opts.quality,
-		OutputFormat:  format,
-		Images:        opts.images,
+		Model:        opts.model,
+		Prompt:       prompt,
+		N:            1,
+		Size:         size,
+		Quality:      opts.quality,
+		OutputFormat: format,
+		Images:       opts.images,
 		// OpenAI only exposes `auto` and `low`; there's no way to fully
 		// disable moderation. Always ask for the permissive side.
 		Moderation:    "low",
@@ -310,8 +306,11 @@ func resolvePrompt(opts options, positional []string) (string, error) {
 
 // --- size enum ---
 
+var customSize = regexp.MustCompile(`^(\d+)x(\d+)$`)
+
 func translateSize(input string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(input)) {
+	s := strings.ToLower(strings.TrimSpace(input))
+	switch s {
 	case "", "auto":
 		return "auto", nil
 	case "square":
@@ -320,8 +319,25 @@ func translateSize(input string) (string, error) {
 		return "1536x1024", nil
 	case "portrait":
 		return "1024x1536", nil
+	case "4k":
+		return "3840x2160", nil
 	}
-	return "", fmt.Errorf("invalid --size %q (use square, landscape, portrait, or auto)", input)
+	m := customSize.FindStringSubmatch(s)
+	if m == nil {
+		return "", fmt.Errorf("invalid --size %q (use square, landscape, portrait, 4k, auto, or WIDTHxHEIGHT)", input)
+	}
+	w, _ := strconv.Atoi(m[1])
+	h, _ := strconv.Atoi(m[2])
+	// Custom-size limits for gpt-image-2.5 (OpenAI docs, 2026-09).
+	switch {
+	case w%16 != 0 || h%16 != 0:
+		return "", fmt.Errorf("invalid --size %q (width and height must be multiples of 16)", input)
+	case max(w, h) > 3*min(w, h):
+		return "", fmt.Errorf("invalid --size %q (aspect ratio must be between 1:3 and 3:1)", input)
+	case max(w, h) > 3840 || w*h > 3840*2160:
+		return "", fmt.Errorf("invalid --size %q (max 3840x2160)", input)
+	}
+	return s, nil
 }
 
 // --- flag parsing ---
@@ -422,13 +438,14 @@ Streams by default — the output file is overwritten atomically each time
 the API emits a partial frame, so viewers see it improve live.
 
 %sOptions:%s
-  -m, --model <id>        gpt-image-2 (default) | gpt-image-1.5 | gpt-image-1 | gpt-image-1-mini
+  -m, --model <id>        gpt-image-2.5-sunburst (default) | gpt-image-2.5-flare |
+                          gpt-image-1-mini
   -p, --prompt <text>     Prompt text (overrides positional / stdin)
   -b, --base <text>       Base prompt prepended to the main prompt
   -i, --image <path>      Input image for editing (repeatable, up to 16)
   -n <1-10>               Variants generated in parallel
-  -s, --size <preset>     square | landscape | portrait | auto
-  -q, --quality <level>   auto | low | medium | high
+  -s, --size <size>       square | landscape | portrait | 4k | auto | WIDTHxHEIGHT
+  -q, --quality <level>   auto | low | medium | high | xhigh | max (xhigh/max: 2.5 only)
   -f, --format <ext>      png | jpeg | webp (default: png)
       --compression <n>   0-100 for jpeg / webp
       --transparent       Transparent background (png / webp only)
@@ -442,6 +459,7 @@ the API emits a partial frame, so viewers see it improve live.
   pix -n 4 "isometric tiny village"
   echo "neon koi fish" | pix -s landscape -q high
   pix -b "studio ghibli style" -p "rainy train station"
+  pix -s 4k -q max "misty fjord at dawn"
   pix -i cat.png --transparent "remove background, add sparkles"
 
 %sRequires OPENAI_API_KEY in the environment.%s
